@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <!-- https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'">
+    <title>Yatin's Lecture Transcription App</title>
+  </head>
+  <body>
+    <h1>Hello World</h1>
+    <button id='record'>Start Recording</button>
+    <div id="status">Status: Ready</div>
+    <input id="live" type="checkbox">Use Live Recording</input>
+    <script src="./renderer.js"></script>
+  </body>
+</html>
