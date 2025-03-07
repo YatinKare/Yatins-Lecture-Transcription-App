@@ -1,6 +1,10 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
 
+// Add these debug lines
+console.log('Directory name:', __dirname);
+console.log('Preload path:', path.join(__dirname, 'preload.js'));
+
 let mainWindow;
 
 app.on('ready', () => {
@@ -9,11 +13,17 @@ app.on('ready', () => {
     height: 600,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
-      nodeIntegration: true,
-      contextIsolation: false,
+      //nodeIntegration: true,
+      nodeIntegration: false,
+      //contextIsolation: false,
+      contextIsolation: true,
+      sandbox: false
     },
   });
 
+  // Add this temporarily for debugging
+  mainWindow.webContents.openDevTools();
+  
   mainWindow.loadFile('index.html');
 });
 

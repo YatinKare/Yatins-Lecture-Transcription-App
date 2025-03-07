@@ -1,8 +1,10 @@
-const { Buffer } = require('buffer');
-const { NonRealTimeVAD } = require('@ricky0123/vad-web');
-const wavEncoder = require('wav-encoder');
-const wavDecoder = require('wav-decoder');
-const { time } = require('console');
+const { Buffer } = window.electronAPI.Buffer;
+const { NonRealTimeVAD } = window.electronAPI.NonRealTimeVAD;
+const wavEncoder = window.electronAPI.wavEncoder;
+const wavDecoder = window.electronAPI.wavDecoder;
+const ffmpeg = window.electronAPI.ffmpeg;
+const OpenAI = window.electronAPI.OpenAI;
+//const WavEncoder = require('wav-encoder');
 
 let mediaRecorder;
 let audioChunks = [];
@@ -21,227 +23,144 @@ function resampleAudio(inputAudio, inputSampleRate, targetSampleRate) {
   return resampled;
 }
 
-
-async function splitAudio(filePath, outputDir) {
+async function getAudio(filePath) {
   const fs = window.electronAPI.fs;
-  const path = window.electronAPI.path;
-
-  const audioBuffer = fs.readFileSync(filePath);
-
-  const wavData = await wavDecoder.decode(audioBuffer);
-  console.log('Original samplerate:', wavData.sampleRate);
-  const { sampleRate, channelData } = wavData;
-
-  const audioData = channelData[0];
-
-  const targetSampleRate = 16000
-  const resampledAudioData = sampleRate !== targetSampleRate
-    ? resampleAudio(audioData, sampleRate, targetSampleRate)
-    : audioData;
-
-  console.log(`Minimum Speech Frames: ${Math.floor(1 * targetSampleRate/160)}`);
-
-  const vad = await NonRealTimeVAD.new({
-    minSpeechFrames: Math.floor(1 * targetSampleRate/160),
+  const { sampleRate, channelData } = await fs.readFile(filePath, (data) => {
+    return data;
+  }).then(function(buffer) {
+    const data = wavDecoder.decode(buffer);
+    return data;
   });
+ // const audioBuffer = data.buffer();
 
-  console.log("Detecting Speech...");
+  //const originalWavData = await wavDecoder.decode(audioBuffer);
+
+
+  // const { sampleRate, channelData } = originalWavData;
+  return  [sampleRate, channelData];
+}
+
+async function resampleSave(filePath) {
+  const path = window.electronAPI.path;
+  const dirname = window.electronAPI.__dirname;
+
+  const dir = path.dirname(filePath);
+  const ext = path.extname(filePath);
+  const baseName = path.basename(filePath, ext);
+
+  const newFileName = `${baseName}_reSampled${ext}`;
+  const newFilePath = path.join(dir, newFileName);
+
+  const result = ffmpeg(filePath).audioFrequency(16000).saveToFile(newFilePath);
+  return newFilePath;
+}
+
+async function audioSplit(filePath, outputDir) {
+  // Store the input file path
+  let FILEPATH = filePath;
+  const path = window.electronAPI.path;
+  const fs = window.electronAPI.fs;
+
+  // Get audio data from the file
+  let [ originalSampleRate, originalChannelData ] = await getAudio(FILEPATH);
+  statusText.textContent = "Audio Data Extracted";
+  // Extract first channel of audio data
+  const originalAudioData = originalChannelData[0];
+
+  console.log('Original samplerate: ', originalSampleRate);
+  console.log('Original Audio Data: ', originalAudioData);
+
+  // Resample audio to 16kHz if needed for VAD processing
   const tempDir = path.join(outputDir, 'temp');
-
-  if (!fs.existsSync(tempDir)) {
-    fs.mkdirSync(tempDir, { recursive: true });
+  if (originalSampleRate != 16000) {
+    if (!fs.existsSync(tempDir)) {
+          fs.mkdirSync(tempDir, { recursive: true });
+    }
+    await resampleSave(FILEPATH).then((result) => { FILEPATH = result });
+    statusText.textContent = "Audio Resampled to 16000";
   }
 
-  let chunkIndex = 0;
+  const [ vadSampleRate, vadChannelData ] = await getAudio(FILEPATH);
+  const vadAudioData = vadChannelData[0];
+
+  statusText.textContent = "Loading VAD Model...";
+  const vad = await NonRealTimeVAD.new();
   let timestamps = [];
-  for await (const { audio, start, end } of vad.run(resampledAudioData, targetSampleRate)) {
 
-    console.log(`Detected speech: Start = ${start}ms, End = ${end}ms`);
-    timestamps.push({ start, end });
+  for await (const {start, end} of vad.run(vadAudioData, vadSampleRate)) {
+    statusText.textContent = `VAD Processing... Total Segments: ${timestamps.length}`;
+    timestamps.push({
+      "start": start,
+      "end": end
+    });
   }
 
-  console.log(typeof(timestamps[0].start));
+  let merged_timestamps = [];
+  let current = timestamps[0];
+  
+  for (let i = 0; i < timestamps.length; i++) {
+    const next = timestamps[i];
+    if (next.start - current.end <= 1000) {
+      current.end = Math.max(current.end, next.end);
+    } else {
+      merged_timestamps.push(current);
+      current = next;
+    }
+  }
+  for (let i = 0; i < merged_timestamps.length; i++) {
+    console.log(`Total segment length: ${(merged_timestamps[i].end- merged_timestamps[i].start) / 1000}`);
+  }
 
-  let merged_timestamps = []
-  for (let segment in timestamps) {
-    console.log(segment);
-    if (merged_timestamps.length) {
-      prev_segment = merged_timestamps[merged_timestamps.length - 1];
-      if (segment.start - prev_segment.end < 1 * 16000) {
-        prev_segment.end = segment.end;
-      } else {
-        merged_timestamps.push(segment)
+  let i = 0;
+  while (i < merged_timestamps.length) {
+    const segment = merged_timestamps[i];
+    const duration = segment.end - segment.start;
+
+    if (duration < 60000) {
+      if (i + 1 < merged_timestamps.length) {
+        merged_timestamps[i].end = merged_timestamps[i + 1].end;
+        merged_timestamps.splice(i + 1, 1);
+      } else if ( i - 1 >= 0) {
+        merged_timestamps[i - 1].end = merged_timestamps[i].end;
+        merged_timestamps.splice(i, 1);
+        i--;
       }
     } else {
-      merged_timestamps.push(segment)
+      i++;
     }
   }
-  console.log(merged_timestamps);
 
-  
+  for (let i = 0; i < merged_timestamps.length; i++) {
+    const current_segment = merged_timestamps[i]; 
+    const audioStart = originalSampleRate * (current_segment.start / 1000);
+    const audioEnd = originalSampleRate * (current_segment.end/ 1000);
+    const slicedSegment = originalAudioData.slice(audioStart, audioEnd);
 
-  if (timestamps.length > 0 && timestamps[0].start > 0) {
-    timestamps.unshift({start:0, end:timestamps[0].start});
-  }
-  // Convert VAD timestamps to original sample rate scale
-  const mappedTimestamps = timestamps.map(({ start, end }) => ({
-    start: Math.floor((start / 1000) * sampleRate),
-    end: Math.ceil((end / 1000) * sampleRate),
-  }));
+    
 
-  console.log("maped times: ", mappedTimestamps);
-
-  /* Chunk the original audio using the mapped timestamps
-  for (const { start, end } of mappedTimestamps) {
-      const chunkAudio = audioData.slice(start, end);
-
-      const chunkBuffer = await wavEncoder.encode({
-          sampleRate: sampleRate, // Use original sample rate
-          channelData: [chunkAudio],
+    
+    const slicedAudioData = await wavEncoder.encode({
+        sampleRate: originalSampleRate,
+        channelData: [slicedSegment]
+      }).then((buffer) => {
+        const chunkPath = path.join(tempDir, `chunk_${i}.wav`);
+        fs.writeFileSync(chunkPath, new Buffer(buffer));
+        statusText.textContent = `Saved combined chunk ${i}`;
+        /*
+        console.log(
+          `Saved combined chunk ${i} to ${chunkPath}`
+        );
+        */
       });
-
-      const chunkPath = path.join(tempDir, `chunk_${++chunkIndex}.wav`);
-      fs.writeFileSync(chunkPath, Buffer.from(chunkBuffer));
-      console.log(`Saved chunk ${chunkIndex} (${start / sampleRate}s - ${end / sampleRate}s) to ${chunkPath}`);
-  }
-      */
-  const MIN_CHUNK_DURATION = 60000; // 1 minute in milliseconds
-
-  let combinedStart = null;
-  let combinedAudio = [];
-  let previousEnd = 0;
-
-  for (const { start, end } of mappedTimestamps) {
-    if (start >= end || start < 0 || end > audioData.length) {
-      console.error(`Invalid slice indices for chunk ${chunkIndex + 1}: Start = ${start}, End = ${end}`);
-      continue;
-    }
-    const chunkDuration = ((end - start) / sampleRate) * 1000; // Duration in milliseconds
-  
-    if (chunkDuration < MIN_CHUNK_DURATION) {
-      if (combinedStart === null) combinedStart = start;
-
-      const slicedAudio = audioData.slice(start, end);
-      const newCombinedAudio = new Float32Array(combinedAudio.length + slicedAudio.length);
-      newCombinedAudio.set(combinedAudio, 0);
-      newCombinedAudio.set(slicedAudio, combinedAudio.length);
-      combinedAudio = newCombinedAudio;
-  
-  
-      const combinedDuration = ((end - combinedStart) / sampleRate) * 1000;
-      if (combinedDuration >= MIN_CHUNK_DURATION) {
-        try {
-            // Flatten combinedAudio into a single Float32Array
-            const flattenedAudio = new Float32Array(
-              combinedAudio.reduce((totalLength, chunk) => totalLength + chunk.length, 0)
-            );
-            let offset = 0;
-            for (const chunk of combinedAudio) {
-              flattenedAudio.set(chunk, offset);
-              offset += chunk.length;
-            }        
-
-          const chunkBuffer = await wavEncoder.encode({
-            sampleRate: sampleRate,
-            channelData: [flattenedAudio],
-          });
-  
-          if (!chunkBuffer || chunkBuffer.length === 0) {
-            console.error("Encoded buffer is empty! Skipping file save.");
-            continue;
-          }
-  
-          const chunkPath = path.join(tempDir, `chunk_${++chunkIndex}.wav`);
-          fs.writeFileSync(chunkPath, Buffer.from(chunkBuffer));
-          console.log(
-            `Saved combined chunk ${chunkIndex} (${combinedStart / sampleRate}s - ${end / sampleRate}s) to ${chunkPath}`
-          );
-  
-          console.log('Resetting combinedStart and combinedAudio');
-          combinedStart = null;
-          combinedAudio = [];
-        } catch (error) {
-          console.error("Failed to save combined chunk:", error);
-        }
-      }
-    } else {
-      if (combinedAudio.length > 0) {
-        try {
-          const chunkBuffer = await wavEncoder.encode({
-            sampleRate: sampleRate,
-            channelData: [new Float32Array(combinedAudio)],
-          });
-  
-          if (!chunkBuffer || chunkBuffer.length === 0) {
-            console.error("Encoded buffer is empty! Skipping file save.");
-            continue;
-          }
-  
-          const chunkPath = path.join(tempDir, `chunk_${++chunkIndex}.wav`);
-          fs.writeFileSync(chunkPath, Buffer.from(chunkBuffer));
-          console.log(
-            `Saved combined chunk ${chunkIndex} (${combinedStart / sampleRate}s - ${previousEnd / sampleRate}s) to ${chunkPath}`
-          );
-  
-          combinedStart = null;
-          combinedAudio = [];
-        } catch (error) {
-          console.error("Failed to save combined chunk:", error);
-        }
-      }
-  
-      const chunkAudio = audioData.slice(start, end);
-
-      if (!chunkAudio || chunkAudio.length === 0) {
-        console.error(`Chunk ${chunkIndex + 1} is empty: Start = ${start}, End = ${end}`);
-        continue; 
-      }
-
-      try {
-        const chunkBuffer = await wavEncoder.encode({
-          sampleRate: sampleRate,
-          channelData: [chunkAudio],
-        });
-  
-        if (!chunkBuffer || chunkBuffer.length === 0) {
-          console.error("Encoded buffer is empty! Skipping file save.");
-          continue;
-        }
-  
-        const chunkPath = path.join(tempDir, `chunk_${++chunkIndex}.wav`);
-        fs.writeFileSync(chunkPath, Buffer.from(chunkBuffer));
-        console.log(`Saved chunk ${chunkIndex} (${start / sampleRate}s - ${end / sampleRate}s) to ${chunkPath}`);
-      } catch (error) {
-        console.error("Failed to save chunk:", error);
-      }
-    }
-  
-    previousEnd = end;
-  }
-  
-  // Finalize the last combined chunk
-  if (combinedAudio.length > 0) {
-    try {
-      const chunkBuffer = await wavEncoder.encode({
-        sampleRate: sampleRate,
-        channelData: [new Float32Array(combinedAudio)],
-      });
-  
-      if (!chunkBuffer || chunkBuffer.length === 0) {
-        console.error("Encoded buffer is empty! Skipping file save.");
-      } else {
-        const chunkPath = path.join(tempDir, `chunk_${++chunkIndex}.wav`);
-        fs.writeFileSync(chunkPath, Buffer.from(chunkBuffer));
-        console.log(`Saved final combined chunk ${chunkIndex} to ${chunkPath}`);
-      }
-    } catch (error) {
-      console.error("Failed to save final combined chunk:", error);
-    }
   }
 
-
-
-  console.log('Audio splitting complete.');
+  let total_len = 0;
+  for (let j = 0; j < merged_timestamps.length; j++) {
+    const cur = merged_timestamps[j];
+    total_len += cur.end - cur.start;
+  }
+  console.log(`Original length: ${(originalAudioData.length / originalSampleRate)}`);
+  console.log(`New total length: ${total_len / 1000}`);
   return tempDir;
 }
 
@@ -275,11 +194,11 @@ recordButton.addEventListener('click', async () => {
           channelData: [channelData],
         });
 
-        const fs = require('fs');
-        const path = require('path');
+        const fs = window.electronAPI.fs;
+        const path = window.electronAPI.path;
 
         const date = new Date().toLocaleDateString('en-US').replace(/\//g, '-');
-        const dirPath = path.join(__dirname, 'resources', date);
+        const dirPath = path.join(dirname, 'resources', date);
         if (!fs.existsSync(dirPath)) {
           fs.mkdirSync(dirPath, { recursive: true });
         }
@@ -302,13 +221,32 @@ recordButton.addEventListener('click', async () => {
 
     }
   } else {
-    const path = require('path');
+    const path = window.electronAPI.path;
+    const dirname = window.electronAPI.__dirname;
 
     const date = new Date().toLocaleDateString('en-US').replace(/\//g, '-');
-    const dirPath = path.join(__dirname, 'resources', date);
+    const dirPath = path.join(dirname, 'resources', date);
     const filePath = path.join(dirPath, 'New Recording 2.wav');
-    splitAudio(filePath, dirPath).then((tempDir) => {
-      console.log(`Chunks saved in: ${tempDir}`);
+    let tempDir = await audioSplit(filePath, dirPath);
+
+    statusText.textContent = "Processing OpenAI...";
+    /*
+
+    const fs = window.electronAPI.fs;
+    const files = fs.readdirSync(tempDir);
+
+    const openai = new OpenAI({
+      apiKey: window.env.OPENAI_API_KEY,
     });
+
+    for (const file of files) {
+      const filePath = path.join(tempDir, file);
+      const transcription = await openai.audio.transcriptions.create({
+        file: fs.createReadStream(filePath),
+        model: "whisper-1",
+      });
+      console.log(transcription);
+    }
+    */
   }
 });

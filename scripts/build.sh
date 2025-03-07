@@ -3,6 +3,8 @@
 # Navigate to the resources directory
 cd resources || { echo "Directory 'resources' not found! Exiting."; exit 1; }
 
+
+
 # Loop through each subdirectory in the resources directory
 for dir in */; do
     # Check if the current item is a directory (to handle any non-directory files)

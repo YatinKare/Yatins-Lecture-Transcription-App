@@ -128,4 +128,5 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
-resources/1-3-2025/New Recording 2.wav
+resources
+resources
